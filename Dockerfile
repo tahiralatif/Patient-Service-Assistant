@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy
@@ -7,7 +7,7 @@ WORKDIR /app
 
 # Install dependencies first so Docker can cache this layer.
 RUN pip install --no-cache-dir uv
-COPY pyproject.toml uv.lock .python-version ./
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Then copy the application code and the knowledge base.

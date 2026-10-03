@@ -10,3 +10,12 @@ wheels/
 .venv
 .env
 
+# Test cache & generated
+.pytest_cache/
+evals/RESULTS.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
