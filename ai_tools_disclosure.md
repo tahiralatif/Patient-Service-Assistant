@@ -1,36 +1,25 @@
 # AI Tools Disclosure
 
-## Tools Used
-| Tool | Purpose | What It Accelerated | What I Verified Independently |
-|------|---------|---------------------|-------------------------------|
-| **GitHub Copilot** | Code completion, boilerplate | FastAPI routes, Pydantic models, test scaffolding, regex patterns | All business logic, error handling, security decisions |
-| **ChatGPT (GPT-4o)** | Design discussion, markdown drafting | Architecture diagrams (mermaid), deliverable templates, wording | All technical decisions, code correctness, test design |
-| **Claude (Sonnet)** | Code review, edge case analysis | Bug pattern recognition (timeout handling), test coverage gaps | All fixes, production architecture tradeoffs |
+## Tools used
 
-## What AI Did NOT Do
-- ❌ Choose the architecture (controlled workflow vs agent) — **my judgment per Part 11**
-- ❌ Design the grounding/citation enforcement — **my design to prevent hallucination**
-- ❌ Define the tool contract (`ok=True` only after store confirms) — **my safety requirement**
-- ❌ Write the evaluation cases — **my test design based on assessment requirements**
-- ❌ Decide on TF-IDF vs embeddings — **my call for scope/simplicity**
-- ❌ Create the multi-step workflow state machine — **my design for confirmation gate**
+I used two AI tools. The first is Claude, from Anthropic, in a chat interface. The second is an AI coding agent in my code editor, running the Nemotron 3 Ultra Free model.
 
-## Human Judgments (Material Decisions)
-1. **Controlled workflow over autonomous agent** — assessed against Part 11, regulatory needs, testability
-2. **Tool layer with `_guarded` converting all exceptions to `tool_failure`** — safety-first, proven by tests
-3. **Grounding via citation verification** — not LLM judge, deterministic, zero hallucination
-4. **Rule-based NLU as default** — deterministic, testable, swappable; LLM only when coverage gap measured
-5. **In-memory store for take-home** — explicit assumption; production design documented separately
-6. **15 evaluation cases** — designed to exceed Part 6 minimum, cover all guardrails
-7. **Docker multi-stage with uv** — reproducible, fast, non-root
+## What the tools did
 
-## Verification Process
-- All AI-suggested code **read, understood, and modified** before commit
-- All tests **written by me** to encode expected behavior
-- All deliverables **drafted by me**, AI used only for formatting/wording
-- Live defense preparation: **I can explain every line** without AI assistance
+Claude helped me understand the assessment brief, plan the order of work, and design and review the knowledge base retrieval and grounding approach, including the checks that stop unsupported answers. The coding agent generated much of the implementation, the automated tests, the evaluation script and the written deliverables in this submission, in response to my instructions. Because much of the code and text was generated, I do not claim to have written every line myself.
 
-## Compliance
-- No confidential data shared with AI tools
-- No fabricated sources, metrics, or claims
-- All code is original or adapted from my own prior patterns
+## What I did
+
+I prepared the content of the knowledge base documents and decided to leave parking and address out of them on purpose, so that unsupported questions are escalated. I ran the test suite and the evaluation script on my own machine. I built the Docker image, ran the container and checked the health endpoint myself. I reviewed the results and corrected statements in the written deliverables that did not match what I had verified.
+
+## Decisions
+
+The architecture, a controlled workflow in which state changing actions run through validated tools and need patient confirmation, was recommended by the AI tools. I reviewed it and accepted it for this submission.
+
+## Review preparation
+
+During the live review I will walk through the request flow, the tool layer, the workflow and the retrieval, and I will say so plainly when I do not know something.
+
+## Confidentiality
+
+All data in the project is synthetic and I shared no confidential data with the tools. To the best of my knowledge the submission contains no fabricated sources, metrics or claims.

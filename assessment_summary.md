@@ -2,76 +2,32 @@
 
 ## What Works
 
-### Core Implementation (Parts 1-5)
-- **POST `/assistant/message`** — FastAPI endpoint with Pydantic validation, 7 intents supported
-- **Rule-based NLU** — deterministic, no API key, swappable for LLM (`nlu.classify` + `nlu.extract_entities`)
-- **Knowledge Base** — 4 markdown docs with frontmatter, split into 8+ chunks with metadata (doc_id, section, owner, last_reviewed)
-- **TF-IDF Retrieval** — coverage threshold (0.5), top-3, finds right sections, returns empty for unknown topics
-- **Grounding** — `answer_from_kb()` returns chunk text verbatim; `ground()` verifies citations ⊆ retrieved; invented sources rejected
-- **Tool Layer** — 6 validated tools (`book_appointment`, `reschedule_appointment`, `cancel_appointment`, `check_availability`, `lookup_appointment`, `escalate_to_human`); `_guarded` wrapper converts **any** exception to `ok=False, code=tool_failure`
-- **Multi-step Workflow** — reschedule: clarify → verify ownership → check slot → **confirm** → execute; in-memory per `session_id`; emergency exits flow
-- **Safety** — emergencies escalate instantly; unknown KB → escalate; timeout → never claims success; no PII in logs; patient_id from auth context
+The service exposes POST /assistant/message, validated with Pydantic, and supports seven intents: booking, rescheduling, cancellation, availability, preparation instructions, insurance and general information, and escalation to a human. Intent detection is rule based, which keeps behaviour deterministic and testable without an API key. It sits behind two functions, classify and extract_entities, so a language model classifier can replace it without changing the rest of the service.
 
-### Testing & Evaluation (Parts 6-7)
-- **38 unit tests** — all pass, cover happy paths, failures, guardrails, timeout safety
-- **15 evaluation cases** (exceeds 12 required) — all pass, cover booking, double-book, closed day, missing fields, ownership, confirmation gate, timeout, KB answer, unknown KB, prompt injection, medical advice, emergency, invalid ID, ambiguous intent
-- **Docker** — multi-stage build with uv, non-root user, healthcheck-ready
+Answers to clinic questions come from a knowledge base of four markdown documents, each with a document identifier, owner and review date. Retrieval requires a minimum share of the meaningful words in the question to match, and the answer is copied from the retrieved text together with its source. A question the knowledge base cannot support, such as one about parking, is escalated to staff and is never guessed. A grounding check rejects any answer that cites a source that was not retrieved.
 
----
+Actions run through six validated tools. A wrapper converts any exception, including a timeout, into a failed result, so the assistant reports success only after the scheduling system confirms the change. The reschedule flow is exercised over two messages through the API: it asks for missing details, verifies that the appointment belongs to the patient, checks the new slot, asks the patient to confirm, and only then executes. Emergency wording ends the flow and escalates immediately. A guardrails module screens each message before any action for attempts to override instructions, requests about another patient and requests for medical advice, and eight tests cover it. A patient cannot read or change another patient's appointment, and logs and escalation tickets hold no message text.
 
-## What Does Not Work / Known Gaps
+The repository contains 46 automated tests and 15 evaluation cases with expected behaviour and pass criteria. All of them pass. The evaluation cases cover booking, double booking, a closed day, missing details, ownership, the confirmation step, a tool timeout, a knowledge base answer, an unsupported question, an adversarial instruction, a request for medical advice, an emergency, an invalid identifier and an ambiguous request. A shared test fixture clears workflow state between tests. I built the Docker image, ran the container and confirmed that the health endpoint and the message endpoint respond.
 
-| Gap | Impact | Mitigation |
-|-----|--------|------------|
-| **In-memory store** | Not scalable, no persistence, race conditions on concurrent booking | Replace with PostgreSQL + advisory locks (see Production Architecture) |
-| **In-memory workflow state** (`_FLOWS` dict) | Lost on restart, no TTL cleanup, single-process only | Durable workflow engine (Temporal) or Redis + TTL |
-| **TF-IDF retrieval** | No semantic understanding; misses paraphrases, Arabic dialect variations | Hybrid BM25 + embeddings (bge-m3) + reranker |
-| **Rule-based NLU** | Limited coverage for paraphrases, typos, Arabic dialects | LLM-based NLU behind feature flag (clean seam at `nlu.classify`/`extract_entities`) |
-| **No auth integration** | `patient_id` passed in request body | JWT validation, session management, RBAC |
-| **No observability** | Only basic logging | Structured logs, metrics (Prometheus), traces (Jaeger), alerts |
-| **No rate limiting / abuse protection** | Vulnerable to spam, DoS | API Gateway (Kong) + rate limits |
-| **Python 3.14 in pyproject.toml** | Doesn't exist yet | Change to `>=3.11` |
-| **Test isolation** | `test_part1_smoke.py` leaks `_FLOWS` | Add `tests/conftest.py` with autouse fixture |
-| **No CI/CD** | Manual test/run | GitHub Actions: lint, typecheck, test, build, deploy |
+## What Does Not Work
 
----
+The scheduling store and the workflow state are held in memory. Data and in progress reschedule flows are lost on restart, nothing expires, and the service works only as a single process.
 
-## What I Would Build Next (Priority Order)
+Intent detection and retrieval are lexical. They miss paraphrases, typing mistakes and Arabic wording, and the service handles English only. Patients who phrase a question differently will be escalated more often than necessary. This is a safe failure, but it adds work for staff.
 
-### 1. Production Hardening (Weeks 1-3)
-- PostgreSQL + Redis + advisory locks for concurrency
-- JWT auth + session management
-- Temporal workflow engine (durable `_FLOWS`)
-- Structured observability (logs, metrics, traces)
-- Rate limiting, API Gateway
-- CI/CD pipeline
+The service has no authentication. The patient identifier is accepted in the request body, and a production deployment would take it from an authenticated session. There is also no rate limiting, structured monitoring or deployment pipeline.
 
-### 2. KB v2 — Semantic Search (Weeks 3-5)
-- Embeddings (bge-m3 for Arabic/English)
-- Hybrid retrieval: BM25 + vector + cross-encoder reranker
-- Chunking strategy optimization (overlap, size)
-- Evaluation harness: retrieval recall@k, grounding precision
+The guardrails recognise known phrasing and are not a complete defence against prompt injection. Free text is not passed to a language model today, which limits exposure, but adding a model would require stronger controls and new tests.
 
-### 3. LLM NLU Behind Flag (Weeks 5-7)
-- Swap `nlu.classify`/`extract_entities` only
-- Few-shot prompt with intent definitions + examples
-- Structured output (Pydantic) for entities
-- A/B test: rule-based vs LLM on intent F1, entity F1, latency
-- Fallback to rule-based on LLM failure
+The project declares a minimum Python version of 3.11 and the Docker image uses Python 3.11, but I ran the test suite locally on Python 3.14. The tests have not been run inside the container.
 
-### 4. Arabic-First Enhancements (Weeks 7-9)
-- Hijri calendar support
-- Prayer-time slot blocking
-- Dialect-aware NLU (Najdi, Hejazi, Gulf)
-- Gender-segregation rules for specialty assignment
+The knowledge base is sample data written for this assessment and is not a real clinic policy. Medical, insurance and regulatory content would need validation by the clinic before use.
 
-### 5. Compliance & Audit (Weeks 9-10)
-- PDPL compliance: consent, retention, DPO, data residency (KSA region)
-- Immutable audit log for every appointment action
-- Penetration testing, chaos engineering
-- MOH/SFDA alignment review
+## Highest Risk Behaviour Not Covered by Tests
 
----
+Concurrent booking. Two simultaneous requests for the same slot can both pass the availability check and both book, because the in memory store has no locking. A database with row level locking, applied inside the booking tool, would remove the risk.
 
-## Highest-Risk Uncovered Behavior
-**Concurrent booking race condition** — two requests for same slot simultaneously both pass availability check, both proceed to book. In-memory store has no locking. Fix: PostgreSQL `SELECT ... FOR UPDATE` or advisory lock in tool layer.
+## What I Would Build Next
+
+First, replace the in memory store and workflow state with a database that supports locking and a shared session store, add authentication, and add structured logs, metrics and rate limiting. Second, add embedding based retrieval beside the current lexical retriever, measure recall and grounding precision, and add Arabic support. Third, place a language model behind the existing intent detection seam, controlled by a feature flag and with the rule based classifier as fallback, and compare intent accuracy, entity accuracy and latency. Fourth, confirm local requirements with the clinic, such as the Hijri calendar, prayer times and the applicable Saudi data protection and health sector rules, before adding any related behaviour.
