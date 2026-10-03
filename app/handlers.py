@@ -1,20 +1,26 @@
 """One handler per intent. Each returns a Result; the API layer wraps it into
 the validated AssistantResponse.
 
-Rule followed everywhere: a reply may only say an action happened if the store
-call actually returned successfully.
+Rules followed everywhere:
+- Every action goes through app/tools/tools.py, never straight to the store.
+- A reply may only say an action happened if the tool returned ok=True.
+- Rescheduling is NOT handled here: it needs a confirmation step, so main.py
+  routes it to workflow.py.
 """
 from dataclasses import dataclass, field
-from typing import Any
 from functools import lru_cache
-from .grounding import answer_from_kb
-from .retrieval import Retriever
-from .nlu import Entities, is_emergency
-from .schemas import Intent, Status
-from .store import (
-    SPECIALTIES, AlreadyCancelled, AppointmentNotFound, AppointmentStore,
-    InvalidSlot, SlotUnavailable,
+from typing import Any
+
+from app.tools.tools import (
+    ToolResult, book_appointment, cancel_appointment,
+    check_availability, escalate_to_human,
 )
+
+from .grounding import answer_from_kb
+from .nlu import Entities, is_emergency
+from .retrieval import Retriever
+from .schemas import Intent, Status
+from .store import SPECIALTIES, AppointmentStore
 
 
 @dataclass
@@ -32,6 +38,7 @@ _FIELD_HELP = {
     "date": "the date (YYYY-MM-DD)",
     "time": "the time (HH:MM, 24-hour)",
 }
+
 
 @lru_cache
 def _get_retriever() -> Retriever:
@@ -51,50 +58,38 @@ def _fmt_slots(slots: list[dict]) -> str:
     return ", ".join(f"{s['date']} {s['time']}" for s in slots)
 
 
+def _fail(res: ToolResult) -> Result:
+    status = Status.NEEDS_CLARIFICATION if res.code == "invalid_input" else Status.NOT_POSSIBLE
+    return Result(status, res.message)
+
+
+def _ticket(store: AppointmentStore, reason: str, patient_id: str | None) -> str | None:
+    res = escalate_to_human(store, reason, patient_id)
+    return res.data["ticket"] if res.ok else None
+
+
+def _ref(ticket: str | None) -> str:
+    return f" Reference: {ticket}." if ticket else ""
+
+
 def _book(e: Entities, store: AppointmentStore) -> Result:
     missing = _missing(e, ["patient_id", "specialty", "date", "time"])
     if missing:
         return _clarify("To book an appointment I still need", missing)
-    try:
-        appt = store.book(e.patient_id, e.specialty, e.date, e.time)
-    except SlotUnavailable:
-        alts = store.list_available(e.specialty, limit=3)
-        hint = f" Next available {e.specialty} slots: {_fmt_slots(alts)}." if alts else ""
-        return Result(Status.NOT_POSSIBLE, "That slot is not available." + hint,
-                      data={"alternatives": alts})
-    except InvalidSlot as exc:
-        return Result(Status.NOT_POSSIBLE, exc.reason)
+    res = book_appointment(store, e.patient_id, e.specialty, e.date, e.time)
+    if not res.ok:
+        if res.code == "slot_unavailable":
+            alt = check_availability(store, e.specialty)
+            alts = alt.data["slots"][:3] if alt.ok else []
+            hint = f" Next available {e.specialty} slots: {_fmt_slots(alts)}." if alts else ""
+            return Result(Status.NOT_POSSIBLE, res.message + hint, data={"alternatives": alts})
+        return _fail(res)
+    appt = res.data["appointment"]
     return Result(
         Status.COMPLETED,
-        f"Your {appt.specialty} appointment is confirmed: {appt.appointment_id} "
-        f"on {appt.date} at {appt.time}.",
-        data={"appointment": appt.as_dict()},
-    )
-
-
-def _reschedule(e: Entities, store: AppointmentStore) -> Result:
-    missing = _missing(e, ["patient_id", "appointment_id", "date", "time"])
-    if missing:
-        return _clarify("To reschedule I still need", missing)
-    try:
-        appt = store.reschedule(e.appointment_id, e.patient_id, e.date, e.time)
-    except AppointmentNotFound:
-        return Result(Status.NOT_POSSIBLE,
-                      "I couldn't find an appointment matching that appointment ID and patient ID.")
-    except AlreadyCancelled:
-        return Result(Status.NOT_POSSIBLE, "That appointment was already cancelled, so it can't be moved.")
-    except SlotUnavailable:
-        current = store.get_owned(e.appointment_id, e.patient_id)
-        alts = store.list_available(current.specialty, limit=3)
-        hint = f" Next available slots: {_fmt_slots(alts)}." if alts else ""
-        return Result(Status.NOT_POSSIBLE, "That new slot is not available." + hint,
-                      data={"alternatives": alts})
-    except InvalidSlot as exc:
-        return Result(Status.NOT_POSSIBLE, exc.reason)
-    return Result(
-        Status.COMPLETED,
-        f"Appointment {appt.appointment_id} is now on {appt.date} at {appt.time}.",
-        data={"appointment": appt.as_dict()},
+        f"Your {appt['specialty']} appointment is confirmed: {appt['appointment_id']} "
+        f"on {appt['date']} at {appt['time']}.",
+        data=res.data,
     )
 
 
@@ -102,30 +97,28 @@ def _cancel(e: Entities, store: AppointmentStore) -> Result:
     missing = _missing(e, ["patient_id", "appointment_id"])
     if missing:
         return _clarify("To cancel I still need", missing)
-    try:
-        appt = store.cancel(e.appointment_id, e.patient_id)
-    except AppointmentNotFound:
-        return Result(Status.NOT_POSSIBLE,
-                      "I couldn't find an appointment matching that appointment ID and patient ID.")
-    except AlreadyCancelled:
-        return Result(Status.NOT_POSSIBLE, "That appointment is already cancelled.")
-    return Result(Status.COMPLETED, f"Appointment {appt.appointment_id} has been cancelled.",
-                  data={"appointment": appt.as_dict()})
+    res = cancel_appointment(store, e.appointment_id, e.patient_id)
+    if not res.ok:
+        return _fail(res)
+    appt = res.data["appointment"]
+    return Result(Status.COMPLETED, f"Appointment {appt['appointment_id']} has been cancelled.",
+                  data=res.data)
 
 
 def _availability(e: Entities, store: AppointmentStore) -> Result:
     missing = _missing(e, ["specialty"])
     if missing:
         return _clarify("To check availability I still need", missing)
-    try:
-        slots = store.list_available(e.specialty, on_date=e.date)
-    except InvalidSlot as exc:
-        return Result(Status.NOT_POSSIBLE, exc.reason)
+    res = check_availability(store, e.specialty, e.date)
+    if not res.ok:
+        return _fail(res)
+    slots = res.data["slots"]
     if slots:
         return Result(Status.COMPLETED, f"Available {e.specialty} slots: {_fmt_slots(slots)}.",
                       data={"slots": slots})
+    nxt_res = check_availability(store, e.specialty)
+    nxt = nxt_res.data["slots"][:3] if nxt_res.ok else []
     if e.date:
-        nxt = store.list_available(e.specialty, limit=3)
         hint = f" Next available: {_fmt_slots(nxt)}." if nxt else ""
         return Result(Status.NOT_POSSIBLE, f"No {e.specialty} slots on {e.date}." + hint,
                       data={"slots": nxt})
@@ -138,31 +131,30 @@ def _preparation(e: Entities, store: AppointmentStore) -> Result:
         return _clarify("To give preparation instructions I still need", ["specialty"])
     answer = answer_from_kb(f"prepare for {e.specialty} appointment", _get_retriever())
     if not answer.grounded:
-        ticket = store.create_escalation("no_verified_answer", e.patient_id)
-        return Result(Status.ESCALATED, f"{answer.reply} Reference: {ticket}.",
-                      data={"ticket": ticket})
+        ticket = _ticket(store, "no_verified_answer", e.patient_id)
+        return Result(Status.ESCALATED, answer.reply + _ref(ticket), data={"ticket": ticket})
     return Result(Status.COMPLETED, answer.reply,
                   data={"specialty": e.specialty, "sources": answer.sources})
+
 
 def _info(e: Entities, store: AppointmentStore, message: str) -> Result:
     answer = answer_from_kb(message, _get_retriever())
     if answer.grounded:
         return Result(Status.COMPLETED, answer.reply, data={"sources": answer.sources})
     # Nothing verified to answer with: do NOT guess, hand over to a human.
-    ticket = store.create_escalation("no_verified_answer", e.patient_id)
-    return Result(Status.ESCALATED, f"{answer.reply} Reference: {ticket}.",
-                  data={"ticket": ticket})
+    ticket = _ticket(store, "no_verified_answer", e.patient_id)
+    return Result(Status.ESCALATED, answer.reply + _ref(ticket), data={"ticket": ticket})
 
 
 def _escalate(e: Entities, store: AppointmentStore, message: str) -> Result:
     emergency = is_emergency(message)
-    ticket = store.create_escalation("possible_emergency" if emergency else "user_requested", e.patient_id)
+    ticket = _ticket(store, "possible_emergency" if emergency else "user_requested", e.patient_id)
     if emergency:
         reply = ("If this is a medical emergency, please contact emergency services immediately "
-                 "and do not wait for this chat. I've also flagged your message to our team. "
-                 f"Reference: {ticket}.")
+                 "and do not wait for this chat. I've also flagged your message to our team."
+                 + _ref(ticket))
     else:
-        reply = f"I've passed this to a member of our team, who will follow up. Reference: {ticket}."
+        reply = "I've passed this to a member of our team, who will follow up." + _ref(ticket)
     return Result(Status.ESCALATED, reply, data={"ticket": ticket})
 
 
@@ -182,8 +174,6 @@ def handle(intent: Intent, candidates: list[Intent], entities: Entities,
            message: str, store: AppointmentStore) -> Result:
     if intent is Intent.BOOK:
         return _book(entities, store)
-    if intent is Intent.RESCHEDULE:
-        return _reschedule(entities, store)
     if intent is Intent.CANCEL:
         return _cancel(entities, store)
     if intent is Intent.AVAILABILITY:
@@ -194,4 +184,5 @@ def handle(intent: Intent, candidates: list[Intent], entities: Entities,
         return _info(entities, store, message)
     if intent is Intent.ESCALATE:
         return _escalate(entities, store, message)
+    # RESCHEDULE is routed to workflow.py by main.py (it needs confirmation).
     return _unknown(candidates)

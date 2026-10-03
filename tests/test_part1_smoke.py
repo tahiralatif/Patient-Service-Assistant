@@ -62,9 +62,14 @@ def test_book_on_closed_day(client):
 
 
 def test_reschedule_own_appointment(client):
-    body = send(client, "Reschedule APT-1001 to 2026-10-08 at 14:00", patient_id="P1001").json()
-    assert body["status"] == "completed"
-    assert body["data"]["appointment"]["time"] == "14:00"
+    msg = "Reschedule APT-1001 to 2026-10-08 at 14:00"
+    first = client.post("/assistant/message", json={
+        "message": msg, "patient_id": "P1001", "session_id": "smoke-resched"}).json()
+    assert first["status"] == "needs_clarification"   # asks for confirmation first
+
+    second = client.post("/assistant/message", json={
+        "message": "yes", "patient_id": "P1001", "session_id": "smoke-resched"}).json()
+    assert second["status"] == "completed"
 
 
 def test_cancel_other_patients_appointment_is_refused(client):

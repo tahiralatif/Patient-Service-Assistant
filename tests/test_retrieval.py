@@ -16,3 +16,6 @@ def test_finds_opening_days():
 def test_unknown_topic_returns_nothing():
     # No parking document exists on purpose.
     assert Retriever().search("Where is the clinic parking?") == []
+
+def test_medical_records_question_is_not_answered_from_kb():
+    assert Retriever().search("Can the doctor see my medical records?") == []
